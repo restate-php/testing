@@ -1,0 +1,45 @@
+{
+  "name": "restate/testing",
+  "description": "Test harness for Restate PHP services: starts Restate in a container and your endpoint, registers it and hands out an ingress client. Install it as a dev dependency.",
+  "type": "library",
+  "keywords": [
+    "restate",
+    "durable-execution",
+    "testing",
+    "phpunit",
+    "integration-testing"
+  ],
+  "homepage": "https://github.com/restate-php/restate",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Márk Sági-Kazár",
+      "email": "mark.sagikazar@gmail.com"
+    }
+  ],
+  "support": {
+    "issues": "https://github.com/restate-php/restate/issues",
+    "source": "https://github.com/restate-php/restate"
+  },
+  "require": {
+    "php": "~8.4.0 || ~8.5.0 || ~8.6.0",
+    "ext-filter": "*",
+    "ext-json": "*",
+    "psr/http-client": "^1.0",
+    "psr/http-factory": "^1.1",
+    "restate/common": "self.version",
+    "restate/ingress": "self.version"
+  },
+  "suggest": {
+    "ext-pcntl": "Lets a test run interrupted with Ctrl-C (SIGINT) or SIGTERM stop the Restate container and the endpoint it started.",
+    "ext-posix": "Lets RestateTestEnvironment::killEndpoint() signal the php -S workers directly instead of running kill(1).",
+    "guzzlehttp/guzzle": "The default PSR-18 client of Restate\\Testing\\RestateTestEnvironment::ingressClient().",
+    "guzzlehttp/psr7": "The default PSR-17 factories of Restate\\Testing\\RestateTestEnvironment::ingressClient() (guzzlehttp/guzzle requires it).",
+    "phpunit/phpunit": "Required to use the Restate\\Testing\\PHPUnit\\InteractsWithRestate trait (PHPUnit 10 or newer)."
+  },
+  "autoload": {
+    "psr-4": {
+      "Restate\\Testing\\": "src/"
+    }
+  }
+}

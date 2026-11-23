@@ -21,8 +21,8 @@ use Restate\Testing\Internal\Validate;
 final readonly class PhpCliServer
 {
     /**
-     * Workers of the built-in server (`PHP_CLI_SERVER_WORKERS`). A handler that calls another handler of the same
-     * endpoint waits for it, so a single worker would deadlock.
+     * Workers of the built-in server (`PHP_CLI_SERVER_WORKERS`). Each attempt holds a worker for its whole request, so
+     * with a single worker one slow attempt would hold up every other invocation and the health checks.
      */
     public const int DEFAULT_WORKERS = 8;
 

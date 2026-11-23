@@ -2,6 +2,9 @@
 
 `Restate\Testing\RestateTestEnvironment` runs integration tests of your [Restate](https://restate.dev) services against a real Restate server: it starts Restate in a container, serves your endpoint script with `php -S` and the Restate PHP extension loaded (or runs your own endpoint image), registers it, and hands out an ingress client ([`restate/ingress`](https://github.com/restate-php/ingress)) connected to it. With PHPUnit, the `InteractsWithRestate` trait shares one environment per process across test classes and prints the Restate and endpoint logs when a test fails. It also restarts, pauses or kills either side for tests of failure handling.
 
+> [!NOTE]
+> A community-maintained SDK: not an official Restate SDK, and not supported by Restate.
+
 ## Installation
 
 ```bash
@@ -46,7 +49,7 @@ Without PHPUnit, `RestateTestEnvironment::start(PhpCliServer::forScript(...))` r
 
 ## Documentation
 
-See [Testing Your Services](https://github.com/restate-php/restate#testing-your-services) in the main repository for every option, and the [main repository](https://github.com/restate-php/restate) for the rest of the SDK.
+See [Testing](https://github.com/restate-php/restate/blob/main/docs/develop/testing.md) for every option, and the [documentation](https://github.com/restate-php/restate/blob/main/docs/README.md) for the rest of the SDK.
 
 This repository is a read-only subtree split of [restate-php/restate](https://github.com/restate-php/restate). Report issues and send pull requests there.
 

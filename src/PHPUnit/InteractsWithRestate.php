@@ -7,6 +7,8 @@ namespace Restate\Testing\PHPUnit;
 use PHPUnit\Framework\Attributes\After;
 use PHPUnit\Framework\Attributes\Before;
 use Restate\Testing\EndpointContainer;
+use Restate\Testing\ExternalEndpoint;
+use Restate\Testing\ExternalRestate;
 use Restate\Testing\PhpCliServer;
 use Restate\Testing\RestateContainer;
 use Restate\Testing\RestateProcess;
@@ -43,13 +45,14 @@ trait InteractsWithRestate
     private int $restateEndpointLogOffset = 0;
 
     /** The endpoint under test. */
-    abstract protected static function restateEndpoint(): PhpCliServer|EndpointContainer;
+    abstract protected static function restateEndpoint(): PhpCliServer|EndpointContainer|ExternalEndpoint;
 
     /**
      * The Restate server to start; override to pin another image, configure it, or run it as a process
-     * (`RestateProcess::default()`, without a container runtime).
+     * (`RestateProcess::default()`, without a container runtime), or connect to one that already runs
+     * (`ExternalRestate::fromEnvironment()`, for example the Restate of `devenv up`).
      */
-    protected static function restateContainer(): RestateContainer|RestateProcess
+    protected static function restateContainer(): RestateContainer|RestateProcess|ExternalRestate
     {
         return RestateContainer::default();
     }

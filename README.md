@@ -43,7 +43,7 @@ Without PHPUnit, `RestateTestEnvironment::start(PhpCliServer::forScript(...))` r
 ## Requirements
 
 - PHP 8.4, 8.5 or 8.6
-- Docker or podman (rootless works), or `restate-server` on `PATH` with `RestateProcess::default()` instead of the default container, which needs no container runtime with `php -S`
+- Docker or podman (rootless works), or `restate-server` on `PATH` with `RestateProcess::default()` instead of the default container, which needs no container runtime with `php -S`, or a Restate that already runs (`ExternalRestate`, such as the one `devenv up` starts)
 - The Restate PHP extension where the endpoint runs (the `php -S` child or your image), not in the test process; the harness does not require [`restate/sdk`](https://github.com/restate-php/sdk), your project does
 - PHPUnit 10 or newer for the trait only
 

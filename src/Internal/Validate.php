@@ -143,6 +143,30 @@ final class Validate
         return $checked;
     }
 
+    /**
+     * An `http://` or `https://` URL with a host and no query or fragment, without a trailing slash.
+     *
+     * @return non-empty-string
+     */
+    public static function url(string $url, string $what): string
+    {
+        $parts = parse_url($url);
+        if (
+            !is_array($parts)
+            || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true)
+            || ($parts['host'] ?? '') === ''
+            || isset($parts['query'])
+            || isset($parts['fragment'])
+            || isset($parts['user'])
+        ) {
+            throw new \InvalidArgumentException("The {$what} must be an http:// or https:// URL with a host and no query, fragment or credentials, got \"{$url}\".");
+        }
+
+        $trimmed = rtrim($url, '/');
+
+        return $trimmed !== '' ? $trimmed : throw new \LogicException('A URL with a host is not empty.');
+    }
+
     public static function port(int $port): int
     {
         if ($port < 1 || $port > 65535) {

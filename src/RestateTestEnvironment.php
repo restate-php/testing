@@ -21,6 +21,10 @@ use Restate\Testing\Internal\Process;
  * {@see EndpointContainer}, and the endpoint is registered with Restate. Drive it through {@see ingressClient()} like
  * production code would. A {@see RestateProcess} with a {@see PhpCliServer} needs no container runtime.
  *
+ * Either side can also run outside the harness, already started (by `devenv up`, for example): an
+ * {@see ExternalRestate} and an {@see ExternalEndpoint} are waited for, registered and read, never started, stopped
+ * or signalled.
+ *
  * ```php
  * $restate = RestateTestEnvironment::start(PhpCliServer::forScript(__DIR__ . '/endpoint.php'));
  * $greeting = $restate->ingressClient()->serviceClient('Greeter')->request('greet', 'Mary')->call();
@@ -116,15 +120,15 @@ final class RestateTestEnvironment
      * @param ?string $restateBinary the `restate-server` of a {@see RestateProcess}, resolved
      */
     private function __construct(
-        private readonly PhpCliServer|EndpointContainer $endpoint,
-        private readonly RestateContainer|RestateProcess $restate,
+        private readonly PhpCliServer|EndpointContainer|ExternalEndpoint $endpoint,
+        private readonly RestateContainer|RestateProcess|ExternalRestate $restate,
         private readonly ?string $runtime,
         private readonly ?string $restateBinary = null,
     ) {
-        $bindAddress = $endpoint->bindAddress ?? getenv(self::BIND_ADDRESS_VARIABLE);
+        $bindAddress = ($endpoint instanceof ExternalEndpoint ? null : $endpoint->bindAddress) ?? getenv(self::BIND_ADDRESS_VARIABLE);
         $this->bindAddress = is_string($bindAddress) && $bindAddress !== ''
             ? $bindAddress
-            : ($restate instanceof RestateProcess ? self::PROCESS_BIND_ADDRESS : self::DEFAULT_BIND_ADDRESS);
+            : ($this->restateOnTestHost() ? self::PROCESS_BIND_ADDRESS : self::DEFAULT_BIND_ADDRESS);
 
         $this->workDir = sys_get_temp_dir() . '/restate-php-test-' . bin2hex(random_bytes(6));
         if (!@mkdir($this->workDir, 0o700, true)) {
@@ -134,13 +138,13 @@ final class RestateTestEnvironment
 
     /**
      * Start Restate and the endpoint, and register the endpoint (under its configured path). Returns once Restate
-     * accepts invocations.
+     * accepts invocations. An {@see ExternalRestate} or {@see ExternalEndpoint} is not started, only waited for.
      *
-     * @param RestateContainer|RestateProcess|null $restate null is {@see RestateContainer::default()}
+     * @param RestateContainer|RestateProcess|ExternalRestate|null $restate null is {@see RestateContainer::default()}
      *
-     * @throws TestEnvironmentException when anything fails to start; nothing is left running
+     * @throws TestEnvironmentException when anything fails to start; nothing the harness started is left running
      */
-    public static function start(PhpCliServer|EndpointContainer $endpoint, RestateContainer|RestateProcess|null $restate = null): self
+    public static function start(PhpCliServer|EndpointContainer|ExternalEndpoint $endpoint, RestateContainer|RestateProcess|ExternalRestate|null $restate = null): self
     {
         $restate ??= RestateContainer::default();
         $environment = new self(
@@ -173,7 +177,7 @@ final class RestateTestEnvironment
      * test suite pays for starting Restate once. A start that failed is not retried; every later call throws a
      * {@see TestEnvironmentException} whose previous exception is the original failure.
      */
-    public static function shared(PhpCliServer|EndpointContainer $endpoint, RestateContainer|RestateProcess|null $restate = null): self
+    public static function shared(PhpCliServer|EndpointContainer|ExternalEndpoint $endpoint, RestateContainer|RestateProcess|ExternalRestate|null $restate = null): self
     {
         $restate ??= RestateContainer::default();
         $key = hash('sha256', serialize([$endpoint, $restate]));
@@ -198,6 +202,10 @@ final class RestateTestEnvironment
     /** The Restate ingress as reached from the test process, for example `http://127.0.0.1:32768`. */
     public function ingressUrl(): string
     {
+        if ($this->restate instanceof ExternalRestate) {
+            return $this->restate->ingressUrl;
+        }
+
         return $this->ingressPort !== null
             ? 'http://127.0.0.1:' . $this->ingressPort
             : throw new TestEnvironmentException('Restate is not running.');
@@ -206,6 +214,10 @@ final class RestateTestEnvironment
     /** The Restate admin API as reached from the test process. */
     public function adminUrl(): string
     {
+        if ($this->restate instanceof ExternalRestate) {
+            return $this->restate->adminUrl;
+        }
+
         return $this->adminPort !== null
             ? 'http://127.0.0.1:' . $this->adminPort
             : throw new TestEnvironmentException('Restate is not running.');
@@ -214,60 +226,90 @@ final class RestateTestEnvironment
     /**
      * The test host as Restate reaches it, for {@see registerDeployment()} URIs of servers on the test host (a proxy
      * in front of the endpoint): `host.docker.internal` from a {@see RestateContainer}, `127.0.0.1` for a
-     * {@see RestateProcess}. A server for a Restate container must listen on an address the container reaches, such
-     * as `0.0.0.0`; for a Restate process, loopback is enough.
+     * {@see RestateProcess}, and {@see ExternalRestate::$testHost} for an external one. A server for a Restate
+     * container must listen on an address the container reaches, such as `0.0.0.0`; for a Restate process, loopback
+     * is enough.
      */
     public function testHostForRestate(): string
     {
-        return $this->restate instanceof RestateProcess ? '127.0.0.1' : self::CONTAINER_HOST;
+        return match (true) {
+            $this->restate instanceof RestateProcess => '127.0.0.1',
+            $this->restate instanceof ExternalRestate => $this->restate->testHost,
+            default => self::CONTAINER_HOST,
+        };
     }
 
     /** The endpoint (including its configured path) as reached from the test process. */
     public function endpointUrl(): string
     {
+        if ($this->endpoint instanceof ExternalEndpoint) {
+            return $this->endpoint->url;
+        }
+
         return 'http://' . Commands::reachableHost($this->bindAddress) . ':' . $this->endpointPort() . $this->endpoint->path;
     }
 
     /**
-     * The host port the endpoint listens on (`php -S`) or is published on (an endpoint container). It stays the same
-     * when the endpoint is killed and started again, since Restate has it registered.
+     * The host port the endpoint listens on (`php -S`) or is published on (an endpoint container), or the port of an
+     * {@see ExternalEndpoint}'s URL. It stays the same when the endpoint is killed and started again, since Restate
+     * has it registered.
      */
     public function endpointPort(): int
     {
+        if ($this->endpoint instanceof ExternalEndpoint) {
+            return $this->endpoint->port();
+        }
+
         return $this->endpointPort ?? throw new TestEnvironmentException('The endpoint is not running.');
     }
 
-    /** Whether the endpoint is running, as far as the harness can tell: it was not killed, and did not exit. */
+    /**
+     * Whether the endpoint is running, as far as the harness can tell: it was not killed, and did not exit. An
+     * {@see ExternalEndpoint} runs while its `/health` answers.
+     */
     public function isEndpointRunning(): bool
     {
+        if ($this->endpoint instanceof ExternalEndpoint) {
+            return Http::isOk('GET', $this->endpointUrl() . '/health');
+        }
+
         return $this->endpointProcess?->isRunning() ?? false;
     }
 
     /**
      * The container CLI the harness runs (`docker`, `podman`, or the configured path), for commands of your own.
      *
-     * @throws TestEnvironmentException when nothing runs in a container (a {@see RestateProcess} and a {@see PhpCliServer})
+     * @throws TestEnvironmentException when the harness runs nothing in a container (a {@see RestateProcess} or an
+     *                                   {@see ExternalRestate}, and a {@see PhpCliServer} or an {@see ExternalEndpoint})
      */
     public function containerRuntime(): string
     {
-        return $this->runtime ?? throw new TestEnvironmentException(
-            'Nothing runs in a container: Restate is a process (RestateProcess) and the endpoint a PhpCliServer.',
-        );
+        return $this->runtime ?? throw new TestEnvironmentException(sprintf(
+            'The harness runs nothing in a container: Restate is %s and the endpoint %s.',
+            $this->restate instanceof ExternalRestate ? 'external (ExternalRestate)' : 'a process (RestateProcess)',
+            $this->endpoint instanceof ExternalEndpoint ? 'external (ExternalEndpoint)' : 'a PhpCliServer',
+        ));
     }
 
     /**
      * The name of the Restate container, for commands of your own (`docker exec`, `docker inspect`).
      *
-     * @throws TestEnvironmentException when Restate is not running, or runs as a process ({@see RestateProcess})
+     * @throws TestEnvironmentException when Restate is not running, runs as a process ({@see RestateProcess}), or
+     *                                   outside the harness ({@see ExternalRestate})
      */
     public function restateContainerName(): string
     {
-        return $this->restateContainer ?? throw new TestEnvironmentException(
-            $this->restate instanceof RestateProcess ? 'Restate runs as a process (RestateProcess), not in a container.' : 'Restate is not running.',
-        );
+        return $this->restateContainer ?? throw new TestEnvironmentException(match (true) {
+            $this->restate instanceof RestateProcess => 'Restate runs as a process (RestateProcess), not in a container.',
+            $this->restate instanceof ExternalRestate => self::externalRestate('has no container the harness runs'),
+            default => 'Restate is not running.',
+        });
     }
 
-    /** The name of the endpoint container, or null for a {@see PhpCliServer} or an endpoint that is not running. */
+    /**
+     * The name of the endpoint container, or null for a {@see PhpCliServer}, an {@see ExternalEndpoint} or an endpoint
+     * that is not running.
+     */
     public function endpointContainerName(): ?string
     {
         return $this->endpointContainer;
@@ -308,8 +350,8 @@ final class RestateTestEnvironment
 
     /**
      * Register the endpoint, or a part of it served under `$path` below the endpoint's own path, with Restate
-     * (forced; over HTTP/2 when the endpoint container is configured {@see EndpointContainer::withHttp2()}, else
-     * HTTP/1.1). {@see start()} has already registered the endpoint itself.
+     * (forced; over HTTP/2 when the endpoint is configured {@see EndpointContainer::withHttp2()} or
+     * {@see ExternalEndpoint::withHttp2()}, else HTTP/1.1). {@see start()} has already registered the endpoint itself.
      *
      * @return string the deployment id
      *
@@ -317,8 +359,16 @@ final class RestateTestEnvironment
      */
     public function registerEndpoint(string $path = ''): string
     {
+        if ($this->endpoint instanceof ExternalEndpoint) {
+            return $this->registerDeployment($this->endpoint->uriForRestate() . $path, http2: $this->endpoint->http2);
+        }
+
         // A Restate process reaches the endpoint where it listens (loopback by default); a container, through the host.
-        $host = $this->restate instanceof RestateProcess ? Commands::reachableHost($this->bindAddress) : self::CONTAINER_HOST;
+        $host = match (true) {
+            $this->restate instanceof RestateProcess => Commands::reachableHost($this->bindAddress),
+            $this->restate instanceof ExternalRestate => $this->restate->testHost,
+            default => self::CONTAINER_HOST,
+        };
 
         return $this->registerDeployment(
             'http://' . $host . ':' . $this->endpointPort() . $this->endpoint->path . $path,
@@ -472,7 +522,7 @@ final class RestateTestEnvironment
     {
         $deadline = $this->deadline($timeoutSeconds);
         $this->waitUntilRestateReady($deadline);
-        if ($this->endpointProcess !== null) {
+        if ($this->endpointProcess !== null || $this->endpoint instanceof ExternalEndpoint) {
             $this->waitUntilEndpointHealthy($deadline);
         }
     }
@@ -487,6 +537,7 @@ final class RestateTestEnvironment
      */
     public function restartRestate(bool $graceful = true, int $stopTimeoutSeconds = 10, ?float $timeoutSeconds = null): void
     {
+        $this->requireOwnRestate('cannot be restarted by it');
         if ($this->restate instanceof RestateProcess) {
             $process = $this->restateProcess ?? throw new TestEnvironmentException('Restate is not running.');
             if ($this->restatePaused) {
@@ -523,6 +574,7 @@ final class RestateTestEnvironment
      */
     public function pauseRestate(): void
     {
+        $this->requireOwnRestate('cannot be paused by it');
         if ($this->restate instanceof RestateProcess) {
             ($this->restateProcess ?? throw new TestEnvironmentException('Restate is not running.'))->signal(Process::signalNumber('STOP'));
         } else {
@@ -537,6 +589,7 @@ final class RestateTestEnvironment
      */
     public function unpauseRestate(?float $timeoutSeconds = null): void
     {
+        $this->requireOwnRestate('cannot be unpaused by it');
         if ($this->restate instanceof RestateProcess) {
             ($this->restateProcess ?? throw new TestEnvironmentException('Restate is not running.'))->signal(Process::signalNumber('CONT'));
         } else {
@@ -552,6 +605,7 @@ final class RestateTestEnvironment
      */
     public function killEndpoint(): void
     {
+        $this->requireOwnEndpoint('cannot be killed');
         if ($this->endpointContainer !== null) {
             Process::run(Commands::signalContainer($this->containerRuntime(), $this->endpointContainer, 9));
         }
@@ -564,6 +618,7 @@ final class RestateTestEnvironment
      */
     public function startEndpoint(?float $timeoutSeconds = null): void
     {
+        $this->requireOwnEndpoint('cannot be started');
         if ($this->endpointPort === null) {
             throw new TestEnvironmentException('The environment is not running.');
         }
@@ -583,6 +638,7 @@ final class RestateTestEnvironment
      */
     public function restartEndpoint(bool $graceful = false, int $stopTimeoutSeconds = 10, ?float $timeoutSeconds = null): void
     {
+        $this->requireOwnEndpoint('cannot be restarted');
         if ($graceful) {
             if ($this->endpointContainer !== null) {
                 Process::run(Commands::stopContainer($this->containerRuntime(), $this->endpointContainer, $stopTimeoutSeconds));
@@ -602,6 +658,7 @@ final class RestateTestEnvironment
      */
     public function signalEndpoint(int $signal): void
     {
+        $this->requireOwnEndpoint('cannot be signalled');
         if ($this->endpointContainer !== null) {
             $this->containerCommand(Commands::signalContainer($this->containerRuntime(), $this->endpointContainer, $signal), "send signal {$signal} to the endpoint container");
 
@@ -635,18 +692,22 @@ final class RestateTestEnvironment
 
     /**
      * What the endpoint wrote to stdout and stderr (the PHP server log, or the endpoint container's output), across
-     * restarts of the endpoint.
+     * restarts of the endpoint; for an {@see ExternalEndpoint}, its log file (empty without one).
      */
     public function endpointLog(int $offset = 0): string
     {
         return is_file($this->endpointLogPath()) ? (string) @file_get_contents($this->endpointLogPath(), offset: $offset) : '';
     }
 
-    /** The last lines of the Restate server log: the container's, or the process's output across its restarts. */
+    /**
+     * The last lines of the Restate server log: the container's, the process's output across its restarts, or an
+     * {@see ExternalRestate}'s log file (empty without one).
+     */
     public function restateLog(int $lines = self::RESTATE_LOG_TAIL_LINES): string
     {
-        if ($this->restate instanceof RestateProcess) {
-            $log = is_file($this->restateLogPath()) ? (string) @file_get_contents($this->restateLogPath()) : '';
+        if ($this->restate instanceof RestateProcess || $this->restate instanceof ExternalRestate) {
+            $path = $this->restateLogPath();
+            $log = $path !== null && is_file($path) ? (string) @file_get_contents($path) : '';
 
             return $log === '' ? '' : implode("\n", array_slice(explode("\n", rtrim($log, "\n")), -max(1, $lines))) . "\n";
         }
@@ -665,7 +726,10 @@ final class RestateTestEnvironment
         fwrite(STDERR, $this->logTails($endpointLogOffset));
     }
 
-    /** Remove the containers, stop Restate and the endpoint, and delete the scratch directory. Idempotent. */
+    /**
+     * Remove the containers, stop Restate and the endpoint, and delete the scratch directory. Idempotent. An
+     * {@see ExternalRestate} and an {@see ExternalEndpoint} keep running.
+     */
     public function stop(): void
     {
         if ($this->stopped) {
@@ -700,8 +764,10 @@ final class RestateTestEnvironment
     {
         $deadline = $this->deadline(null);
 
-        $this->endpointPort = self::freePort($this->bindAddress);
-        $this->launchEndpoint();
+        if (!$this->endpoint instanceof ExternalEndpoint) {
+            $this->endpointPort = self::freePort($this->bindAddress);
+            $this->launchEndpoint();
+        }
         $this->startRestate();
 
         // The endpoint was started first: fail early when it exits meanwhile.
@@ -714,7 +780,11 @@ final class RestateTestEnvironment
     private function launchEndpoint(): void
     {
         $this->endpointLaunchOffset = $this->endpointLogSize();
-        $this->endpoint instanceof PhpCliServer ? $this->startPhpCliServer($this->endpoint) : $this->startEndpointContainer($this->endpoint);
+        match (true) {
+            $this->endpoint instanceof PhpCliServer => $this->startPhpCliServer($this->endpoint),
+            $this->endpoint instanceof EndpointContainer => $this->startEndpointContainer($this->endpoint),
+            default => throw new \LogicException('The harness does not start an external endpoint.'),
+        };
     }
 
     /** Forget the endpoint process after killing whatever is left of it, and remove its container. */
@@ -791,6 +861,9 @@ final class RestateTestEnvironment
      */
     private function startRestate(): void
     {
+        if ($this->restate instanceof ExternalRestate) {
+            return;
+        }
         if ($this->restate instanceof RestateProcess) {
             [$this->ingressPort, $this->adminPort, $this->nodePort] = self::freePorts('127.0.0.1', 3);
             $this->launchRestateProcess();
@@ -831,6 +904,9 @@ final class RestateTestEnvironment
 
                 return;
             } catch (TestEnvironmentException $exception) {
+                if ($this->restate instanceof ExternalRestate) {
+                    throw new TestEnvironmentException(sprintf('%s (the external Restate at %s)', $exception->getMessage(), $this->restate->adminUrl), 0, $exception);
+                }
                 $portTaken = $this->restateProcess !== null && !$this->restateProcess->isRunning()
                     && preg_match(self::PORT_TAKEN, $this->restateLogSince($this->restateLaunchOffset)) === 1;
                 if (!$portTaken || $attempt >= self::PORT_ATTEMPTS || microtime(true) >= $deadline) {
@@ -875,26 +951,32 @@ final class RestateTestEnvironment
         }
 
         $inherited = array_filter(getenv(), static fn (string $name): bool => !str_starts_with($name, 'RESTATE_'), ARRAY_FILTER_USE_KEY);
-        $this->restateLaunchOffset = is_file($this->restateLogPath()) ? (int) filesize($this->restateLogPath()) : 0;
+        $logPath = $this->workDir . '/restate.log';
+        $this->restateLaunchOffset = is_file($logPath) ? (int) filesize($logPath) : 0;
         $this->restateProcess = Process::start(
             Commands::restateProcess($this->restateBinary),
-            $this->restateLogPath(),
+            $logPath,
             [...$inherited, ...Commands::restateProcessEnvironment($restate, $this->workDir . '/restate', self::PROCESS_NODE_NAME, $this->ingressPort, $this->adminPort, $this->nodePort)],
             $this->workDir,
             inheritEnvironment: false,
         );
     }
 
-    private function restateLogPath(): string
+    /** The Restate log of a {@see RestateProcess}, or the log file of an {@see ExternalRestate} (null without one). */
+    private function restateLogPath(): ?string
     {
-        return $this->workDir . '/restate.log';
+        return $this->restate instanceof ExternalRestate ? $this->restate->logFile : $this->workDir . '/restate.log';
     }
 
     private function restateLogSince(int $offset): string
     {
-        clearstatcache(true, $this->restateLogPath());
+        $path = $this->restateLogPath();
+        if ($path === null) {
+            return '';
+        }
+        clearstatcache(true, $path);
 
-        return is_file($this->restateLogPath()) ? (string) @file_get_contents($this->restateLogPath(), offset: $offset) : '';
+        return is_file($path) ? (string) @file_get_contents($path, offset: $offset) : '';
     }
 
     /**
@@ -909,6 +991,9 @@ final class RestateTestEnvironment
 
                 return;
             } catch (TestEnvironmentException $exception) {
+                if ($this->endpoint instanceof ExternalEndpoint) {
+                    throw $exception;
+                }
                 $portTaken = !$this->isEndpointRunning() && preg_match(self::PORT_TAKEN, $this->endpointLog($this->endpointLaunchOffset)) === 1;
                 if (!$portTaken || $attempt >= self::PORT_ATTEMPTS || microtime(true) >= $deadline) {
                     throw $exception;
@@ -966,8 +1051,9 @@ final class RestateTestEnvironment
     private function logTails(int $endpointLogOffset = 0): string
     {
         $output = '';
-        if ($this->restateContainer !== null || $this->restateBinary !== null) {
-            $output .= sprintf("\n--- Restate log (%s, last %d lines) ---\n%s", $this->restateContainer ?? $this->restateBinary, self::RESTATE_LOG_TAIL_LINES, $this->restateLog());
+        $restateLog = $this->restateContainer ?? $this->restateBinary ?? ($this->restate instanceof ExternalRestate ? $this->restate->logFile : null);
+        if ($restateLog !== null) {
+            $output .= sprintf("\n--- Restate log (%s, last %d lines) ---\n%s", $restateLog, self::RESTATE_LOG_TAIL_LINES, $this->restateLog());
         }
 
         $lines = explode("\n", rtrim($this->endpointLog($endpointLogOffset), "\n"));
@@ -989,9 +1075,44 @@ final class RestateTestEnvironment
         $this->stop();
     }
 
+    /** The log of the endpoint the harness runs, or the log file of an {@see ExternalEndpoint} (without one, a path that does not exist). */
     private function endpointLogPath(): string
     {
+        if ($this->endpoint instanceof ExternalEndpoint) {
+            return $this->endpoint->logFile ?? $this->workDir . '/no-endpoint-log';
+        }
+
         return $this->workDir . '/endpoint.log';
+    }
+
+    /** Whether Restate reaches the test host on loopback, so an endpoint the harness serves need not listen on the network. */
+    private function restateOnTestHost(): bool
+    {
+        return $this->restate instanceof RestateProcess
+            || ($this->restate instanceof ExternalRestate && in_array($this->restate->testHost, ['127.0.0.1', 'localhost', '[::1]'], true));
+    }
+
+    private function requireOwnRestate(string $what): void
+    {
+        if ($this->restate instanceof ExternalRestate) {
+            throw new TestEnvironmentException(self::externalRestate($what));
+        }
+    }
+
+    private function requireOwnEndpoint(string $what): void
+    {
+        if ($this->endpoint instanceof ExternalEndpoint) {
+            throw new TestEnvironmentException(sprintf(
+                'The endpoint at %s runs outside the harness (ExternalEndpoint) and %s by it: run the test with an endpoint the harness serves (PhpCliServer, EndpointContainer).',
+                $this->endpoint->url,
+                $what,
+            ));
+        }
+    }
+
+    private static function externalRestate(string $what): string
+    {
+        return "Restate runs outside the harness (ExternalRestate) and {$what}: run the test with a Restate the harness starts (RestateContainer, RestateProcess).";
     }
 
     private static function findRuntime(?string $configured): string

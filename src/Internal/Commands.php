@@ -193,6 +193,22 @@ final class Commands
         return [$runtime, 'rm', '--force', '--volumes', $name];
     }
 
+    /**
+     * `image inspect`, which fails when the runtime does not have the image.
+     *
+     * @return list<string>
+     */
+    public static function inspectImage(string $runtime, string $image): array
+    {
+        return [$runtime, 'image', 'inspect', '--format', '{{.Id}}', $image];
+    }
+
+    /** @return list<string> */
+    public static function pullImage(string $runtime, string $image): array
+    {
+        return [$runtime, 'pull', '--quiet', $image];
+    }
+
     /** The host the test process uses to reach a server listening on the bind address. */
     public static function reachableHost(string $bindAddress): string
     {

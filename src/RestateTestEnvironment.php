@@ -762,6 +762,7 @@ final class RestateTestEnvironment
 
     private function boot(): void
     {
+        $this->pullMissingImages();
         $deadline = $this->deadline(null);
 
         if (!$this->endpoint instanceof ExternalEndpoint) {
@@ -775,6 +776,26 @@ final class RestateTestEnvironment
         $this->waitUntilEndpointHealthy($deadline, movePortIfTaken: true);
 
         $this->registerEndpoint();
+    }
+
+    /**
+     * Pull the Restate image and the endpoint's when the runtime does not have them, before the startup timeout
+     * starts: `run` would pull them itself, and a pull on a fresh machine can take longer than the timeout.
+     */
+    private function pullMissingImages(): void
+    {
+        $images = [];
+        if ($this->restate instanceof RestateContainer) {
+            $images[] = $this->restate->image;
+        }
+        if ($this->endpoint instanceof EndpointContainer) {
+            $images[] = $this->endpoint->image;
+        }
+        foreach (array_unique($images) as $image) {
+            if (Process::run(Commands::inspectImage($this->containerRuntime(), $image))[0] !== 0) {
+                $this->containerCommand(Commands::pullImage($this->containerRuntime(), $image), "pull {$image}");
+            }
+        }
     }
 
     private function launchEndpoint(): void
